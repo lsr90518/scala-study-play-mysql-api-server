@@ -166,7 +166,9 @@ object Message {
 ```
 
 #### DAO(Data Access Object)の定義
-次に実際にDBへ接続する部分の実装です。
+次に実際にDBへ接続する部分の実装です。Slickのクセが大きい所なのでまずはテンプレとして覚えていても大丈夫だと思います。SlickではDBの操作を`TableQuery`オブジェクトで隠蔽しており、それにレコードを追加したり削除することでDB操作を実現します。
+
+`app/models/MessageDAO.scala`
 
 ```
 package models
@@ -191,6 +193,7 @@ class MessageDAO @Inject()(val dbConfigProvider: DatabaseConfigProvider) {
 
   import dbConfig.driver.api._
 
+  // テーブル定義
   private class MessageTable(tag: Tag) extends Table[Message](tag, "messages") {
 
     def id = column[Long]("id", O.PrimaryKey, O.AutoInc)
@@ -202,16 +205,13 @@ class MessageDAO @Inject()(val dbConfigProvider: DatabaseConfigProvider) {
   private val messages = TableQuery[MessageTable]
 
   def all(): Future[List[Message]] = dbConfig.db.run(messages.result).map(_.toList)
-
-  def create(message: Message): Future[Int] = {
-    val n = message.copy()
-    dbConfig.db.run(messages += n)
-  }
 }
 ```
 
 #### APIの実装
+controllerで先ほど作成したDAOのAPIを叩きます。DAOのAPIがFutureを返すような設計になっているため、`scala.concurrent`のimport文が必要です。`dao.all()`で返されるMessageオブジェクトは、JSONシリアライズする`implicit val`を持っているため、そのまま`toJson`に渡してあげるだけでJSON形式に変換されます。
 
+`app/controllers/Application.scala`
 
 ```
 package controllers
@@ -227,6 +227,7 @@ import javax.inject.Inject
 import models.database.Message
 import models.MessageDAO
 
+// Futureを扱うにはこの2つのimportが必要
 import scala.concurrent._
 import scala.concurrent.ExecutionContext.Implicits.global
 
@@ -242,3 +243,5 @@ class Application @Inject() (dao: MessageDAO) extends Controller {
   }
 }
 ```
+
+ここまで出来たらDBに適当なレコードを追加して(直接MySQLを触る)、再度`GET http://localhost:9000/message`にリクエストを投げましょう。DBから取得されたレコードがレスポンスとして返されるはずです。
