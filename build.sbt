@@ -10,7 +10,10 @@ libraryDependencies ++= Seq(
   jdbc,
   cache,
   ws,
-  specs2 % Test
+  specs2 % Test,
+  "mysql" % "mysql-connector-java" % "5.1.38",
+  "com.typesafe.play" %% "play-slick" % "1.1.1",
+  "commons-dbcp" % "commons-dbcp" % "1.4"
 )
 
 resolvers += "scalaz-bintray" at "http://dl.bintray.com/scalaz/releases"

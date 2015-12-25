@@ -13,6 +13,8 @@ Scala on PlayでAPIサーバーを構築するサンプルです。より本番�
 |---|---|
 | scala | 2.11.7 |
 | Play Framework| 2.4.6 |
+| play-slick | 1.1.1 |
+| mysql-connector-java | 5.1.38 |
 
 ## アジェンダ
 
@@ -43,6 +45,9 @@ $ activator run
 ```
 
 ### 簡単なAPIを作成する
+
+まずは簡単なAPIを作成し、動くことを確認します。ここはRuby on Railsなどの他のサーバーサイドMVCフレームワークを触ったことがある人なら、難しくないと思います。
+
 #### ルーティングの設定
 APIを作成するに辺り、まずはURLルーティングの設定を行います。ルーティングの設定ファイル`routes`に、以下のルーティングを設定します。
 
@@ -82,3 +87,158 @@ class Application extends Controller {
 ```
 
 これで完了です。[Advanced REST client](https://chrome.google.com/webstore/detail/advanced-rest-client/hgmloofddffdnphfgcellkdfbfbjeloo)などのツールを使用して、`GET http://localhost:9000/message`へリクエストを送信してみましょう。
+
+### MySQLの設定をする
+次にMySQLへの接続設定を行います。今回は簡略化のため、DBの初期化・マイグレーションは組み込んでいません。そのため、[Sequel Pro](http://www.sequelpro.com/)などを使用して、DB・テーブルの作成、初期レコードのInsertを行ってください。本プロジェクトでは`test`というDBに、`messages`というテーブルを作成しています。
+
+```
+> CREATE DATABSE test
+> USE test
+> CREATE TABLE `messages` (
+  `id` int(11) unsigned NOT NULL AUTO_INCREMENT,
+  `text` text NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+```
+
+#### モジュールの追加
+ビルド定義ファイルに以下のモジュールを追加します。今回は`slick`というScala用O/R Mapperを使用します。slickにはPlay Frameworkから簡単に使える`play-slick`というモジュールが用意されているため、そちらを使用します。`play-slick`のバージョンは[scala及びplayのバージョンによって厳密に](https://github.com/playframework/play-slick)定められています。
+
+同様に、MySQLへ接続するための`mysql-connector-java`を使用します。もう一つのモジュール、`commons-dbcp`はコネクションプールを管理するためのモジュールですが、今回は特に意識しなくて大丈夫です。
+
+`build.sbt`
+
+```
+libraryDependencies ++= Seq(
+  jdbc,
+  cache,
+  ws,
+  specs2 % Test,
+  "mysql" % "mysql-connector-java" % "5.1.38",
+  "com.typesafe.play" %% "play-slick" % "1.1.1",
+  "commons-dbcp" % "commons-dbcp" % "1.4"
+)
+```
+
+#### MySQLの設定
+まずは簡単に、localhostで立ち上げたMySQLへの接続を確立します。以下の設定を`conf/application.conf`に追加してください。`slick.dbs.default.db.url`の値は、"jdbc:mysql://<host_name>:<port>/<db_name>?user=<user_name>&password=<password>"のフォーマットです。
+
+`conf/application.conf`
+
+```
+slick.dbs.default.driver="slick.driver.MySQLDriver$"
+slick.dbs.default.db.driver="com.mysql.jdbc.Driver"
+slick.dbs.default.db.url="jdbc:mysql://localhost:3306/test?user=root&password=password"
+```
+
+ここまで出来たら一度サーバを起動しましょう。モジュールのインストールが走るはずです。
+
+```
+$ activator run
+```
+
+### MySQLからデータを取得する
+次は実際にMySQLから取得したデータを、APIレスポンスとして返却する実装をします。O/R Mapperのslick固有の処理があって難しいですが、一通りのコードを眺めてみましょう。
+
+#### モデル定義
+`app/models/database/`というディレクトリを切って、モデルを定義していきます。今回はサンプルとして、PrimaryKeyのidとtextというカラムをもった`messages`テーブルを使用しています。
+
+ポイント
+* `case class`でMessageクラスを定義する
+* コンパニオンオブジェクトを作成
+* コンパニオンオブジェクトは`implicit val`を持つ。これを定義することで、JSONのシリアライズ/デシリアライズが可能となる。
+
+詳しいコードの解説は後述します。
+
+`app/models/database/Message.scala`
+
+```
+package models.database
+
+import play.api.libs.json._
+
+case class Message (id: Option[Long], text: String)
+
+object Message {
+  implicit val messageWrites = Json.writes[Message]
+  implicit val messageReads = Json.reads[Message]
+}
+```
+
+#### DAO(Data Access Object)の定義
+次に実際にDBへ接続する部分の実装です。
+
+```
+package models
+
+import javax.inject.Singleton
+import javax.inject.Inject
+
+import scala.concurrent.Future
+
+import play.api.db.slick.DatabaseConfigProvider
+import play.api.libs.concurrent.Execution.Implicits.defaultContext
+import slick.driver.JdbcProfile
+
+import models.database.Message
+
+import play.api.libs.json._
+
+@Singleton
+class MessageDAO @Inject()(val dbConfigProvider: DatabaseConfigProvider) {
+
+  val dbConfig = dbConfigProvider.get[JdbcProfile]
+
+  import dbConfig.driver.api._
+
+  private class MessageTable(tag: Tag) extends Table[Message](tag, "messages") {
+
+    def id = column[Long]("id", O.PrimaryKey, O.AutoInc)
+    def text= column[String]("text")
+
+    def * = (id.?, text) <> ((Message.apply _).tupled, Message.unapply)
+  }
+
+  private val messages = TableQuery[MessageTable]
+
+  def all(): Future[List[Message]] = dbConfig.db.run(messages.result).map(_.toList)
+
+  def create(message: Message): Future[Int] = {
+    val n = message.copy()
+    dbConfig.db.run(messages += n)
+  }
+}
+```
+
+#### APIの実装
+
+
+```
+package controllers
+
+import play.api._
+import play.api.mvc._
+
+import play.api.libs.json._;
+
+// ここからimport文追加
+import javax.inject.Inject
+
+import models.database.Message
+import models.MessageDAO
+
+import scala.concurrent._
+import scala.concurrent.ExecutionContext.Implicits.global
+
+class Application @Inject() (dao: MessageDAO) extends Controller {
+
+  def index = Action {
+    Ok(views.html.index("Your new application is ready."))
+  }
+
+  // APIの処理を書き直し
+  def message = Action.async {
+    dao.all().map(messages => Ok(Json.toJson(Json.toJson(messages))))
+  }
+}
+```
